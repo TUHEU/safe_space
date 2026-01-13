@@ -120,7 +120,7 @@ class DatabaseHelper {
 
   Future<Database> _initDatabase() async {
     final databasesPath = await getDatabasesPath();
-    final path = join(databasesPath, 'safespace.db');
+    final path = p.join(databasesPath, 'safespace.db');
 
     // Supprimer la base existante pour les tests (optionnel)
     // await deleteDatabase(path);

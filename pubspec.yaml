@@ -1,0 +1,38 @@
+name: safe_space
+description: "Une application douce pour prendre soin de son esprit"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  hive_flutter: ^1.1.0
+  animated_splash_screen: ^1.3.0
+  page_transition: ^2.0.9
+  flutter_launcher_icons: ^0.14.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.0
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
+
+
+flutter:
+  uses-material-design: true
+  
+  # Configuration de l'icône de l'application
+  # L'icône doit être placée dans le dossier assets
+  assets:
+    - assets/icon.png

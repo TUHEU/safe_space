@@ -1,22 +1,21 @@
 // ==============================================
 // SAFESPACE - Application Flutter Complète
 // Version avec Splash Screen et couleurs attrayantes
+// Tous les boutons fonctionnels
+// Base de données SQLite
 // ==============================================
 
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hive_flutter/hive_flutter.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
 import 'package:animated_splash_screen/animated_splash_screen.dart';
 import 'package:page_transition/page_transition.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialiser Hive pour le stockage local
-  await Hive.initFlutter();
-  Hive.registerAdapter(MoodEntryAdapter());
-  Hive.registerAdapter(MoodTypeAdapter());
 
   // Orientation portrait uniquement
   await SystemChrome.setPreferredOrientations([
@@ -31,54 +30,48 @@ void main() async {
 // 1. MODÈLES DE DONNÉES
 // ==============================================
 
-@HiveType(typeId: 0)
-enum MoodType {
-  @HiveField(0)
-  happy,
-  @HiveField(1)
-  calm,
-  @HiveField(2)
-  neutral,
-  @HiveField(3)
-  sad,
-  @HiveField(4)
-  stressed,
-}
+enum MoodType { happy, calm, neutral, sad, stressed }
 
-@HiveType(typeId: 1)
 class MoodEntry {
-  @HiveField(0)
+  int? id;
   final MoodType mood;
-
-  @HiveField(1)
   final DateTime date;
-
-  @HiveField(2)
   final String? note;
-
-  @HiveField(3)
   final double? intensity;
 
   MoodEntry({
+    this.id,
     required this.mood,
     required this.date,
     this.note,
     this.intensity,
   });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'mood': mood.index,
+      'date': date.toIso8601String(),
+      'note': note,
+      'intensity': intensity ?? 0.5,
+    };
+  }
+
+  factory MoodEntry.fromMap(Map<String, dynamic> map) {
+    return MoodEntry(
+      id: map['id'],
+      mood: MoodType.values[map['mood']],
+      date: DateTime.parse(map['date']),
+      note: map['note'],
+      intensity: map['intensity'],
+    );
+  }
 }
 
-@HiveType(typeId: 2)
 class JournalEntry {
-  @HiveField(0)
   final String id;
-
-  @HiveField(1)
   final DateTime date;
-
-  @HiveField(2)
   final String content;
-
-  @HiveField(3)
   final MoodType? mood;
 
   JournalEntry({
@@ -87,55 +80,222 @@ class JournalEntry {
     required this.content,
     this.mood,
   });
-}
 
-// Adapters Hive
-class MoodTypeAdapter extends TypeAdapter<MoodType> {
-  @override
-  final typeId = 0;
-
-  @override
-  MoodType read(BinaryReader reader) {
-    return MoodType.values[reader.readByte()];
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'date': date.toIso8601String(),
+      'content': content,
+      'mood': mood?.index,
+    };
   }
 
-  @override
-  void write(BinaryWriter writer, MoodType obj) {
-    writer.writeByte(obj.index);
-  }
-}
-
-class MoodEntryAdapter extends TypeAdapter<MoodEntry> {
-  @override
-  final typeId = 1;
-
-  @override
-  MoodEntry read(BinaryReader reader) {
-    return MoodEntry(
-      mood: MoodType.values[reader.readByte()],
-      date: DateTime.parse(reader.readString()),
-      note: reader.readString(),
-      intensity: reader.readDouble(),
+  factory JournalEntry.fromMap(Map<String, dynamic> map) {
+    return JournalEntry(
+      id: map['id'],
+      date: DateTime.parse(map['date']),
+      content: map['content'],
+      mood: map['mood'] != null ? MoodType.values[map['mood']] : null,
     );
-  }
-
-  @override
-  void write(BinaryWriter writer, MoodEntry obj) {
-    writer.writeByte(obj.mood.index);
-    writer.writeString(obj.date.toIso8601String());
-    writer.writeString(obj.note ?? '');
-    writer.writeDouble(obj.intensity ?? 0.5);
   }
 }
 
 // ==============================================
-// 2. GESTION D'ÉTAT
+// 2. BASE DE DONNÉES SQLite
+// ==============================================
+
+class DatabaseHelper {
+  static final DatabaseHelper _instance = DatabaseHelper._internal();
+  factory DatabaseHelper() => _instance;
+  DatabaseHelper._internal();
+
+  static Database? _database;
+
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDatabase();
+    return _database!;
+  }
+
+  Future<Database> _initDatabase() async {
+    final databasesPath = await getDatabasesPath();
+    final path = join(databasesPath, 'safespace.db');
+
+    // Supprimer la base existante pour les tests (optionnel)
+    // await deleteDatabase(path);
+
+    return await openDatabase(path, version: 1, onCreate: _onCreate);
+  }
+
+  Future<void> _onCreate(Database db, int version) async {
+    // Table des humeurs
+    await db.execute('''
+      CREATE TABLE moods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mood INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        note TEXT,
+        intensity REAL DEFAULT 0.5
+      )
+    ''');
+
+    // Table du journal
+    await db.execute('''
+      CREATE TABLE journal (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        content TEXT NOT NULL,
+        mood INTEGER
+      )
+    ''');
+
+    // Table des préférences
+    await db.execute('''
+      CREATE TABLE preferences (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    ''');
+
+    // Insérer la valeur par défaut pour le mode sombre
+    await db.insert('preferences', {'key': 'darkMode', 'value': 'false'});
+  }
+
+  // Méthodes pour les humeurs
+  Future<int> insertMood(MoodEntry mood) async {
+    final db = await database;
+    return await db.insert('moods', mood.toMap());
+  }
+
+  Future<List<MoodEntry>> getAllMoods() async {
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query('moods');
+    return List.generate(maps.length, (i) => MoodEntry.fromMap(maps[i]));
+  }
+
+  Future<List<MoodEntry>> getMoodsByDate(DateTime date) async {
+    final db = await database;
+    final dateStr = DateTime(date.year, date.month, date.day).toIso8601String();
+    final List<Map<String, dynamic>> maps = await db.query(
+      'moods',
+      where: 'date LIKE ?',
+      whereArgs: ['$dateStr%'],
+    );
+    return List.generate(maps.length, (i) => MoodEntry.fromMap(maps[i]));
+  }
+
+  Future<int> updateMood(MoodEntry mood) async {
+    final db = await database;
+    return await db.update(
+      'moods',
+      mood.toMap(),
+      where: 'id = ?',
+      whereArgs: [mood.id],
+    );
+  }
+
+  Future<int> deleteMood(int id) async {
+    final db = await database;
+    return await db.delete('moods', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> deleteMoodsByDate(DateTime date) async {
+    final db = await database;
+    final dateStr = DateTime(date.year, date.month, date.day).toIso8601String();
+    return await db.delete(
+      'moods',
+      where: 'date LIKE ?',
+      whereArgs: ['$dateStr%'],
+    );
+  }
+
+  // Méthodes pour le journal
+  Future<int> insertJournal(JournalEntry entry) async {
+    final db = await database;
+    return await db.insert('journal', entry.toMap());
+  }
+
+  Future<List<JournalEntry>> getAllJournals() async {
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query('journal');
+    return List.generate(maps.length, (i) => JournalEntry.fromMap(maps[i]));
+  }
+
+  Future<int> deleteJournal(String id) async {
+    final db = await database;
+    return await db.delete('journal', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // Méthodes pour les préférences
+  Future<void> setPreference(String key, String value) async {
+    final db = await database;
+    await db.insert('preferences', {
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> getPreference(String key) async {
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query(
+      'preferences',
+      where: 'key = ?',
+      whereArgs: [key],
+    );
+    if (maps.isNotEmpty) {
+      return maps.first['value'] as String?;
+    }
+    return null;
+  }
+
+  // Statistiques
+  Future<Map<MoodType, int>> getMoodFrequency() async {
+    final db = await database;
+    final List<Map<String, dynamic>> result = await db.rawQuery('''
+      SELECT mood, COUNT(*) as count 
+      FROM moods 
+      GROUP BY mood
+    ''');
+
+    final frequency = <MoodType, int>{};
+    for (var mood in MoodType.values) {
+      frequency[mood] = 0;
+    }
+
+    for (var row in result) {
+      final mood = MoodType.values[row['mood'] as int];
+      frequency[mood] = row['count'] as int;
+    }
+
+    return frequency;
+  }
+
+  Future<List<MoodEntry>> getMoodsLast7Days() async {
+    final db = await database;
+    final weekAgo = DateTime.now().subtract(const Duration(days: 7));
+    final List<Map<String, dynamic>> maps = await db.query(
+      'moods',
+      where: 'date >= ?',
+      whereArgs: [weekAgo.toIso8601String()],
+    );
+    return List.generate(maps.length, (i) => MoodEntry.fromMap(maps[i]));
+  }
+
+  Future<void> close() async {
+    final db = await database;
+    await db.close();
+  }
+}
+
+// ==============================================
+// 3. GESTION D'ÉTAT
 // ==============================================
 
 class AppState extends ChangeNotifier {
   List<MoodEntry> _moodEntries = [];
   List<JournalEntry> _journalEntries = [];
   bool _darkMode = false;
+  final DatabaseHelper _dbHelper = DatabaseHelper();
 
   List<MoodEntry> get moodEntries => _moodEntries;
   List<JournalEntry> get journalEntries => _journalEntries;
@@ -157,10 +317,9 @@ class AppState extends ChangeNotifier {
     'Ton bien-être est important.',
   ];
 
-  String get todaysAffirmation {
-    final now = DateTime.now();
-    final index = now.day % _affirmations.length;
-    return _affirmations[index];
+  String getRandomAffirmation() {
+    final random = DateTime.now().millisecondsSinceEpoch % _affirmations.length;
+    return _affirmations[random];
   }
 
   MoodEntry? get todaysMood {
@@ -175,78 +334,115 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  // Charger les données depuis Hive
+  // Charger les données depuis SQLite
   Future<void> loadData() async {
-    final moodBox = await Hive.openBox<MoodEntry>('moods');
-    final journalBox = await Hive.openBox<JournalEntry>('journal');
+    try {
+      _moodEntries = await _dbHelper.getAllMoods();
+      _journalEntries = await _dbHelper.getAllJournals();
 
-    _moodEntries = moodBox.values.toList();
-    _journalEntries = journalBox.values.toList();
+      // Charger le thème
+      final darkModeStr = await _dbHelper.getPreference('darkMode');
+      _darkMode = darkModeStr == 'true';
 
-    // Charger le thème
-    final prefsBox = await Hive.openBox('preferences');
-    _darkMode = prefsBox.get('darkMode', defaultValue: false);
-
-    notifyListeners();
+      notifyListeners();
+    } catch (e) {
+      print('Error loading data: $e');
+    }
   }
 
   // Ajouter une humeur
   Future<void> addMoodEntry(MoodEntry entry) async {
-    final box = await Hive.openBox<MoodEntry>('moods');
-    await box.put(entry.date.toIso8601String(), entry);
-    _moodEntries = box.values.toList();
-    notifyListeners();
+    try {
+      await _dbHelper.insertMood(entry);
+      _moodEntries = await _dbHelper.getAllMoods();
+      notifyListeners();
+    } catch (e) {
+      print('Error adding mood entry: $e');
+    }
+  }
+
+  // Mettre à jour l'humeur du jour
+  Future<void> updateTodaysMood(MoodEntry newEntry) async {
+    try {
+      final today = DateTime.now();
+
+      // Supprimer les anciennes entrées du jour
+      await _dbHelper.deleteMoodsByDate(today);
+
+      // Ajouter la nouvelle entrée
+      await _dbHelper.insertMood(newEntry);
+      _moodEntries = await _dbHelper.getAllMoods();
+      notifyListeners();
+    } catch (e) {
+      print('Error updating mood: $e');
+    }
   }
 
   // Ajouter une entrée de journal
   Future<void> addJournalEntry(JournalEntry entry) async {
-    final box = await Hive.openBox<JournalEntry>('journal');
-    await box.put(entry.id, entry);
-    _journalEntries = box.values.toList();
-    notifyListeners();
+    try {
+      await _dbHelper.insertJournal(entry);
+      _journalEntries = await _dbHelper.getAllJournals();
+      notifyListeners();
+    } catch (e) {
+      print('Error adding journal entry: $e');
+    }
   }
 
   // Supprimer une entrée de journal
   Future<void> deleteJournalEntry(String id) async {
-    final box = await Hive.openBox<JournalEntry>('journal');
-    await box.delete(id);
-    _journalEntries = box.values.toList();
-    notifyListeners();
+    try {
+      await _dbHelper.deleteJournal(id);
+      _journalEntries = await _dbHelper.getAllJournals();
+      notifyListeners();
+    } catch (e) {
+      print('Error deleting journal entry: $e');
+    }
   }
 
   // Basculer le mode sombre
   Future<void> toggleDarkMode() async {
     _darkMode = !_darkMode;
-    final box = await Hive.openBox('preferences');
-    await box.put('darkMode', _darkMode);
-    notifyListeners();
+    try {
+      await _dbHelper.setPreference('darkMode', _darkMode.toString());
+      notifyListeners();
+    } catch (e) {
+      print('Error toggling dark mode: $e');
+    }
   }
 
   // Statistiques
-  Map<MoodType, int> getMoodFrequency() {
-    final frequency = <MoodType, int>{};
-    for (var mood in MoodType.values) {
-      frequency[mood] = _moodEntries.where((e) => e.mood == mood).length;
-    }
-    return frequency;
+  Future<Map<MoodType, int>> getMoodFrequency() async {
+    return await _dbHelper.getMoodFrequency();
   }
 
-  MoodType? getMostFrequentMood() {
-    final frequency = getMoodFrequency();
+  Future<MoodType?> getMostFrequentMood() async {
+    final frequency = await getMoodFrequency();
     if (frequency.isEmpty) return null;
-    return frequency.entries.reduce((a, b) => a.value > b.value ? a : b).key;
+
+    final entries = frequency.entries.toList();
+    MoodType? mostFrequent;
+    int maxCount = 0;
+
+    for (var entry in entries) {
+      if (entry.value > maxCount) {
+        maxCount = entry.value;
+        mostFrequent = entry.key;
+      }
+    }
+
+    return mostFrequent;
   }
 
   int get checkInDays => _moodEntries.length;
 
-  List<MoodEntry> getLastWeekEntries() {
-    final weekAgo = DateTime.now().subtract(const Duration(days: 7));
-    return _moodEntries.where((e) => e.date.isAfter(weekAgo)).toList();
+  Future<List<MoodEntry>> getLastWeekEntries() async {
+    return await _dbHelper.getMoodsLast7Days();
   }
 }
 
 // ==============================================
-// 3. THÈME ET COULEURS ATTRACTIVES
+// 4. THÈME ET COULEURS ATTRACTIVES
 // ==============================================
 
 class AppColors {
@@ -331,12 +527,12 @@ ThemeData getLightTheme() {
       ),
       iconTheme: IconThemeData(color: AppColors.primary),
     ),
-    cardTheme: ThemeData.light().cardTheme.copyWith(
+    cardTheme: CardTheme(
       elevation: 3,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       color: AppColors.surface,
       shadowColor: AppColors.primary.withOpacity(0.2),
-      margin: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
     ),
     floatingActionButtonTheme: FloatingActionButtonThemeData(
       backgroundColor: AppColors.primary,
@@ -348,8 +544,8 @@ ThemeData getLightTheme() {
         backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        padding: EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-        textStyle: TextStyle(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+        textStyle: const TextStyle(
           fontSize: 16,
           fontWeight: FontWeight.w600,
           fontFamily: 'Inter',
@@ -373,11 +569,11 @@ ThemeData getLightTheme() {
         borderRadius: BorderRadius.circular(12),
         borderSide: BorderSide(color: AppColors.primary, width: 2),
       ),
-      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       hintStyle: TextStyle(color: AppColors.textLight),
       labelStyle: TextStyle(color: AppColors.text),
     ),
-    textTheme: TextTheme(
+    textTheme: const TextTheme(
       titleLarge: TextStyle(
         fontSize: 28,
         fontWeight: FontWeight.w700,
@@ -440,12 +636,12 @@ ThemeData getDarkTheme() {
       ),
       iconTheme: IconThemeData(color: AppColors.darkPrimary),
     ),
-    cardTheme: ThemeData.dark().cardTheme.copyWith(
+    cardTheme: CardTheme(
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       color: AppColors.darkSurface,
       shadowColor: Colors.black.withOpacity(0.4),
-      margin: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
     ),
     floatingActionButtonTheme: FloatingActionButtonThemeData(
       backgroundColor: AppColors.darkPrimary,
@@ -457,8 +653,8 @@ ThemeData getDarkTheme() {
         backgroundColor: AppColors.darkPrimary,
         foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        padding: EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-        textStyle: TextStyle(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+        textStyle: const TextStyle(
           fontSize: 16,
           fontWeight: FontWeight.w600,
           fontFamily: 'Inter',
@@ -481,11 +677,11 @@ ThemeData getDarkTheme() {
         borderRadius: BorderRadius.circular(12),
         borderSide: BorderSide(color: AppColors.darkPrimary, width: 2),
       ),
-      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       hintStyle: TextStyle(color: AppColors.darkTextLight),
       labelStyle: TextStyle(color: AppColors.darkText),
     ),
-    textTheme: TextTheme(
+    textTheme: const TextTheme(
       titleLarge: TextStyle(
         fontSize: 28,
         fontWeight: FontWeight.w700,
@@ -523,7 +719,7 @@ ThemeData getDarkTheme() {
 }
 
 // ==============================================
-// 4. ÉCRAN SPLASH
+// 5. ÉCRAN SPLASH
 // ==============================================
 
 class SplashScreen extends StatelessWidget {
@@ -538,7 +734,6 @@ class SplashScreen extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Utilisez votre icône t.png ici
               Container(
                 width: 120,
                 height: 120,
@@ -555,13 +750,14 @@ class SplashScreen extends StatelessWidget {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(30),
-                  child: Image.asset(
-                    'assets/icon.png', // Votre icône t.png
-                    fit: BoxFit.contain,
+                  child: Icon(
+                    Icons.psychology_outlined,
+                    size: 60,
+                    color: AppColors.primary,
                   ),
                 ),
               ),
-              SizedBox(height: 30),
+              const SizedBox(height: 30),
               Text(
                 'SafeSpace',
                 style: TextStyle(
@@ -572,7 +768,7 @@ class SplashScreen extends StatelessWidget {
                   letterSpacing: 1.2,
                 ),
               ),
-              SizedBox(height: 10),
+              const SizedBox(height: 10),
               Text(
                 'Prenez soin de votre esprit',
                 style: TextStyle(
@@ -582,12 +778,12 @@ class SplashScreen extends StatelessWidget {
                   fontWeight: FontWeight.w400,
                 ),
               ),
-              SizedBox(height: 50),
+              const SizedBox(height: 50),
               CircularProgressIndicator(
                 valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
                 strokeWidth: 3,
               ),
-              SizedBox(height: 30),
+              const SizedBox(height: 30),
               Text(
                 'Chargement...',
                 style: TextStyle(
@@ -605,13 +801,20 @@ class SplashScreen extends StatelessWidget {
 }
 
 // ==============================================
-// 5. WIDGETS DE BASE
+// 6. WIDGETS DE BASE
 // ==============================================
 
 class MoodSelector extends StatefulWidget {
   final Function(MoodType, String?) onMoodSelected;
+  final MoodType? initialMood;
+  final String? initialNote;
 
-  const MoodSelector({super.key, required this.onMoodSelected});
+  const MoodSelector({
+    super.key,
+    required this.onMoodSelected,
+    this.initialMood,
+    this.initialNote,
+  });
 
   @override
   State<MoodSelector> createState() => _MoodSelectorState();
@@ -620,6 +823,15 @@ class MoodSelector extends StatefulWidget {
 class _MoodSelectorState extends State<MoodSelector> {
   final TextEditingController _noteController = TextEditingController();
   MoodType? _selectedMood;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMood = widget.initialMood;
+    if (widget.initialNote != null && widget.initialNote!.isNotEmpty) {
+      _noteController.text = widget.initialNote!;
+    }
+  }
 
   @override
   void dispose() {
@@ -681,7 +893,7 @@ class _MoodSelectorState extends State<MoodSelector> {
               BoxShadow(
                 color: AppColors.primary.withOpacity(0.3),
                 blurRadius: 10,
-                offset: Offset(0, 4),
+                offset: const Offset(0, 4),
               ),
             ],
           ),
@@ -696,8 +908,10 @@ class _MoodSelectorState extends State<MoodSelector> {
               ),
             ),
             child: Text(
-              'Enregistrer mon état',
-              style: TextStyle(
+              widget.initialMood != null
+                  ? 'Mettre à jour'
+                  : 'Enregistrer mon état',
+              style: const TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.w600,
                 color: Colors.white,
@@ -717,7 +931,7 @@ class _MoodSelectorState extends State<MoodSelector> {
     return GestureDetector(
       onTap: () => setState(() => _selectedMood = mood),
       child: AnimatedContainer(
-        duration: Duration(milliseconds: 300),
+        duration: const Duration(milliseconds: 300),
         decoration: BoxDecoration(
           gradient: isSelected
               ? LinearGradient(
@@ -779,11 +993,13 @@ class _MoodSelectorState extends State<MoodSelector> {
       SnackBar(
         content: Row(
           children: [
-            Icon(Icons.favorite, color: Colors.white),
-            SizedBox(width: 10),
+            const Icon(Icons.favorite, color: Colors.white),
+            const SizedBox(width: 10),
             Text(
-              'Merci d\'avoir pris ce moment pour toi 💙',
-              style: TextStyle(
+              widget.initialMood != null
+                  ? 'Humeur mise à jour 💙'
+                  : 'Merci d\'avoir pris ce moment pour toi 💙',
+              style: const TextStyle(
                 fontFamily: 'Inter',
                 fontWeight: FontWeight.w500,
               ),
@@ -793,7 +1009,7 @@ class _MoodSelectorState extends State<MoodSelector> {
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         backgroundColor: AppColors.primary,
-        duration: Duration(seconds: 3),
+        duration: const Duration(seconds: 3),
       ),
     );
   }
@@ -830,22 +1046,30 @@ class _MoodSelectorState extends State<MoodSelector> {
 }
 
 // ==============================================
-// 6. ÉCRAN D'ACCUEIL
+// 7. ÉCRAN D'ACCUEIL
 // ==============================================
 
 class HomeScreen extends StatefulWidget {
   final AppState appState;
+  final Function(int) onNavigate;
 
-  const HomeScreen({super.key, required this.appState});
+  const HomeScreen({
+    super.key,
+    required this.appState,
+    required this.onNavigate,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  String _currentAffirmation = '';
+
   @override
   void initState() {
     super.initState();
+    _currentAffirmation = widget.appState.getRandomAffirmation();
     widget.appState.addListener(_refresh);
   }
 
@@ -859,11 +1083,54 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {});
   }
 
+  void _updateMood() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Modifier mon humeur',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  fontFamily: 'Inter',
+                ),
+              ),
+              const SizedBox(height: 20),
+              MoodSelector(
+                onMoodSelected: (mood, note) {
+                  final entry = MoodEntry(
+                    mood: mood,
+                    date: DateTime.now(),
+                    note: note,
+                    intensity: 0.5,
+                  );
+                  widget.appState.updateTodaysMood(entry);
+                  Navigator.pop(context);
+                },
+                initialMood: widget.appState.todaysMood?.mood,
+                initialNote: widget.appState.todaysMood?.note,
+              ),
+              SizedBox(height: MediaQuery.of(context).viewInsets.bottom),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final todaysMood = widget.appState.todaysMood;
-    final affirmation = widget.appState.todaysAffirmation;
 
     return Scaffold(
       backgroundColor: colors.background,
@@ -891,17 +1158,15 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ],
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.asset(
-                          'assets/icon.png',
-                          fit: BoxFit.contain,
-                          width: 30,
-                          height: 30,
+                      child: Center(
+                        child: Icon(
+                          Icons.psychology_outlined,
+                          color: Colors.white,
+                          size: 30,
                         ),
                       ),
                     ),
-                    SizedBox(width: 12),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -939,12 +1204,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 32),
 
                 // Message positif
-                _buildPositiveMessage(affirmation, colors),
+                _buildPositiveMessage(_currentAffirmation, colors),
 
                 const SizedBox(height: 32),
 
                 // Accès rapide aux autres fonctionnalités
-                _buildQuickAccess(context),
+                _buildQuickAccess(),
 
                 const SizedBox(height: 32),
 
@@ -989,7 +1254,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: AppColors.primary,
                   size: 28,
                 ),
-                SizedBox(width: 12),
+                const SizedBox(width: 12),
                 Text(
                   'Check-in quotidien',
                   style: TextStyle(
@@ -1072,7 +1337,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                SizedBox(width: 16),
+                const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1124,7 +1389,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: AppColors.primary,
                       size: 20,
                     ),
-                    SizedBox(width: 12),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Text(
                         mood.note!,
@@ -1142,10 +1407,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
             const SizedBox(height: 16),
             ElevatedButton(
-              onPressed: () {
-                // Permettre de changer l'humeur
-                widget.appState.notifyListeners();
-              },
+              onPressed: _updateMood,
               style: ElevatedButton.styleFrom(
                 backgroundColor: colors.surface,
                 foregroundColor: colors.primary,
@@ -1154,7 +1416,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 side: BorderSide(color: colors.primary.withOpacity(0.3)),
               ),
-              child: Text(
+              child: const Text(
                 'Modifier mon humeur',
                 style: TextStyle(
                   fontFamily: 'Inter',
@@ -1210,7 +1472,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                SizedBox(width: 12),
+                const SizedBox(width: 12),
                 Text(
                   'Petit rappel du jour 💭',
                   style: TextStyle(
@@ -1238,8 +1500,10 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 IconButton(
                   onPressed: () {
-                    // Nouvelle affirmation
-                    widget.appState.notifyListeners();
+                    setState(() {
+                      _currentAffirmation = widget.appState
+                          .getRandomAffirmation();
+                    });
                   },
                   icon: Icon(Icons.refresh, color: AppColors.primary),
                   tooltip: 'Nouveau message',
@@ -1252,7 +1516,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildQuickAccess(BuildContext context) {
+  Widget _buildQuickAccess() {
     final colors = Theme.of(context).colorScheme;
 
     return Column(
@@ -1267,51 +1531,38 @@ class _HomeScreenState extends State<HomeScreen> {
             fontFamily: 'Inter',
           ),
         ),
-        SizedBox(height: 16),
+        const SizedBox(height: 16),
         GridView.count(
           shrinkWrap: true,
-          physics: NeverScrollableScrollPhysics(),
+          physics: const NeverScrollableScrollPhysics(),
           crossAxisCount: 2,
           crossAxisSpacing: 16,
           mainAxisSpacing: 16,
           childAspectRatio: 1.2,
           children: [
             _buildQuickAccessItem(
-              context,
               Icons.book_outlined,
               'Journal',
               AppColors.info,
-              () {
-                // Naviguer vers le journal
-                // Dans la navigation principale, cela sera géré
-              },
+              () => widget.onNavigate(1),
             ),
             _buildQuickAccessItem(
-              context,
               Icons.self_improvement_outlined,
               'Respiration',
               AppColors.secondary,
-              () {
-                // Naviguer vers la respiration
-              },
+              () => widget.onNavigate(2),
             ),
             _buildQuickAccessItem(
-              context,
               Icons.insights_outlined,
               'Statistiques',
               AppColors.success,
-              () {
-                // Naviguer vers les statistiques
-              },
+              () => widget.onNavigate(3),
             ),
             _buildQuickAccessItem(
-              context,
               Icons.help_outline,
-              'Aide',
+              'Aide & Urgences',
               AppColors.warning,
-              () {
-                // Naviguer vers l'aide
-              },
+              () => _showEmergencyDialog(context),
             ),
           ],
         ),
@@ -1320,7 +1571,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildQuickAccessItem(
-    BuildContext context,
     IconData icon,
     String label,
     Color color,
@@ -1346,7 +1596,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: Center(child: Icon(icon, color: color, size: 28)),
             ),
-            SizedBox(height: 12),
+            const SizedBox(height: 12),
             Text(
               label,
               style: TextStyle(
@@ -1355,6 +1605,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 color: Theme.of(context).colorScheme.onBackground,
                 fontFamily: 'Inter',
               ),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -1382,7 +1633,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(
             children: [
               Icon(Icons.warning_amber_rounded, color: colors.error, size: 20),
-              SizedBox(width: 8),
+              const SizedBox(width: 8),
               Text(
                 'Important',
                 style: TextStyle(
@@ -1394,7 +1645,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          SizedBox(height: 12),
+          const SizedBox(height: 12),
           Text(
             '⚠️ Cette application ne remplace pas un professionnel de santé. '
             'En cas de besoin urgent, contactez le 3114.',
@@ -1409,6 +1660,79 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showEmergencyDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          'Numéros d\'urgence',
+          style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w700),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildEmergencyNumber('3114', 'Prévention du suicide'),
+            const SizedBox(height: 16),
+            _buildEmergencyNumber('15', 'SAMU'),
+            const SizedBox(height: 16),
+            _buildEmergencyNumber('112', 'Urgences européennes'),
+            const SizedBox(height: 20),
+            Text(
+              'Ces services sont disponibles 24h/24 et 7j/7.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(
+                  context,
+                ).colorScheme.onBackground.withOpacity(0.6),
+                fontFamily: 'Inter',
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              'Fermer',
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmergencyNumber(String number, String description) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          number,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
+            color: Colors.red,
+            fontFamily: 'Inter',
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          description,
+          style: TextStyle(
+            fontSize: 14,
+            color: Theme.of(context).colorScheme.onBackground.withOpacity(0.8),
+            fontFamily: 'Inter',
+          ),
+        ),
+      ],
     );
   }
 
@@ -1444,7 +1768,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ==============================================
-// 7. ÉCRAN DE JOURNAL (Simplifié pour l'espace)
+// 8. ÉCRAN DE JOURNAL
 // ==============================================
 
 class JournalScreen extends StatefulWidget {
@@ -1475,7 +1799,9 @@ class _JournalScreenState extends State<JournalScreen> {
   }
 
   void _refresh() {
-    setState(() {});
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   void _saveEntry() {
@@ -1483,7 +1809,7 @@ class _JournalScreenState extends State<JournalScreen> {
       final entry = JournalEntry(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         date: DateTime.now(),
-        content: _journalController.text,
+        content: _journalController.text.trim(),
         mood: widget.appState.todaysMood?.mood,
       );
 
@@ -1494,7 +1820,7 @@ class _JournalScreenState extends State<JournalScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Row(
-            children: [
+            children: const [
               Icon(Icons.check_circle, color: Colors.white),
               SizedBox(width: 10),
               Text(
@@ -1521,31 +1847,31 @@ class _JournalScreenState extends State<JournalScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(
+        title: const Text(
           'Supprimer cette entrée ?',
           style: TextStyle(fontFamily: 'Inter'),
         ),
-        content: Text(
+        content: const Text(
           'Cette action ne peut pas être annulée.',
           style: TextStyle(fontFamily: 'Inter'),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Annuler', style: TextStyle(fontFamily: 'Inter')),
+            child: const Text('Annuler', style: TextStyle(fontFamily: 'Inter')),
           ),
           TextButton(
             onPressed: () {
               widget.appState.deleteJournalEntry(id);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
+                const SnackBar(
                   content: Text('Entrée supprimée'),
                   backgroundColor: AppColors.love,
                 ),
               );
             },
-            child: Text(
+            child: const Text(
               'Supprimer',
               style: TextStyle(
                 color: Colors.red,
@@ -1566,13 +1892,17 @@ class _JournalScreenState extends State<JournalScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
+        title: const Text(
           'Journal personnel',
           style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600),
         ),
         actions: [
           if (_journalController.text.isNotEmpty)
-            IconButton(onPressed: _saveEntry, icon: Icon(Icons.save)),
+            IconButton(
+              onPressed: _saveEntry,
+              icon: const Icon(Icons.save),
+              tooltip: 'Sauvegarder',
+            ),
         ],
       ),
       body: Column(
@@ -1589,7 +1919,7 @@ class _JournalScreenState extends State<JournalScreen> {
                 BoxShadow(
                   color: colors.primary.withOpacity(0.1),
                   blurRadius: 10,
-                  offset: Offset(0, 2),
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
@@ -1633,7 +1963,7 @@ class _JournalScreenState extends State<JournalScreen> {
       floatingActionButton: _journalController.text.isNotEmpty
           ? FloatingActionButton(
               onPressed: _saveEntry,
-              child: Icon(Icons.save),
+              child: const Icon(Icons.save),
               backgroundColor: AppColors.primary,
             )
           : null,
@@ -1650,7 +1980,7 @@ class _JournalScreenState extends State<JournalScreen> {
             size: 80,
             color: colors.onBackground.withOpacity(0.3),
           ),
-          SizedBox(height: 20),
+          const SizedBox(height: 20),
           Text(
             'Votre journal est vide',
             style: TextStyle(
@@ -1660,7 +1990,7 @@ class _JournalScreenState extends State<JournalScreen> {
               fontWeight: FontWeight.w600,
             ),
           ),
-          SizedBox(height: 8),
+          const SizedBox(height: 8),
           Text(
             'Commencez à écrire vos pensées...',
             style: TextStyle(
@@ -1684,7 +2014,7 @@ class _JournalScreenState extends State<JournalScreen> {
           BoxShadow(
             color: colors.primary.withOpacity(0.1),
             blurRadius: 10,
-            offset: Offset(0, 2),
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -1706,24 +2036,29 @@ class _JournalScreenState extends State<JournalScreen> {
                 ),
                 if (entry.mood != null)
                   Container(
-                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
-                      color: AppColors.moodColors[entry.mood]!.withOpacity(0.1),
+                      color: AppColors.moodColors[entry.mood!]!.withOpacity(
+                        0.1,
+                      ),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(
                       children: [
                         Icon(
                           _getMoodIcon(entry.mood!),
-                          color: AppColors.moodColors[entry.mood],
+                          color: AppColors.moodColors[entry.mood!],
                           size: 16,
                         ),
-                        SizedBox(width: 4),
+                        const SizedBox(width: 4),
                         Text(
                           _getMoodLabel(entry.mood!),
                           style: TextStyle(
                             fontSize: 10,
-                            color: AppColors.moodColors[entry.mood],
+                            color: AppColors.moodColors[entry.mood!],
                             fontFamily: 'Inter',
                             fontWeight: FontWeight.w600,
                           ),
@@ -1733,7 +2068,7 @@ class _JournalScreenState extends State<JournalScreen> {
                   ),
               ],
             ),
-            SizedBox(height: 12),
+            const SizedBox(height: 12),
             Text(
               entry.content,
               style: TextStyle(
@@ -1743,7 +2078,7 @@ class _JournalScreenState extends State<JournalScreen> {
                 fontFamily: 'Inter',
               ),
             ),
-            SizedBox(height: 12),
+            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerRight,
               child: IconButton(
@@ -1807,7 +2142,7 @@ class _JournalScreenState extends State<JournalScreen> {
 }
 
 // ==============================================
-// 8. ÉCRAN DE RESPIRATION (Simplifié)
+// 9. ÉCRAN DE RESPIRATION
 // ==============================================
 
 class BreathingScreen extends StatefulWidget {
@@ -1857,6 +2192,10 @@ class _BreathingScreenState extends State<BreathingScreen>
     if (_isRunning) {
       _timer?.cancel();
       _isRunning = false;
+      _currentTime = 0;
+      _currentPhase = 'Inspirez';
+      _controller.reverse();
+      setState(() {});
       return;
     }
 
@@ -1896,7 +2235,7 @@ class _BreathingScreenState extends State<BreathingScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
+        title: const Text(
           'Respiration calme',
           style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600),
         ),
@@ -1914,7 +2253,7 @@ class _BreathingScreenState extends State<BreathingScreen>
         ),
         child: Center(
           child: SingleChildScrollView(
-            padding: EdgeInsets.all(20),
+            padding: const EdgeInsets.all(20),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -1932,7 +2271,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                             AppColors.primary.withOpacity(0.4),
                             AppColors.primary.withOpacity(0.1),
                           ],
-                          stops: [0.5, 1.0],
+                          stops: const [0.5, 1.0],
                         ),
                         border: Border.all(
                           color: AppColors.primary.withOpacity(0.8),
@@ -1961,7 +2300,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                   },
                 ),
 
-                SizedBox(height: 48),
+                const SizedBox(height: 48),
 
                 // Instructions
                 Text(
@@ -1974,7 +2313,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                     letterSpacing: 2,
                   ),
                 ),
-                SizedBox(height: 8),
+                const SizedBox(height: 8),
                 Text(
                   'Inspirez • Retenez • Expirez',
                   style: TextStyle(
@@ -1985,7 +2324,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                   ),
                 ),
 
-                SizedBox(height: 48),
+                const SizedBox(height: 48),
 
                 // Timer
                 Container(
@@ -2012,7 +2351,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                   ),
                 ),
 
-                SizedBox(height: 40),
+                const SizedBox(height: 40),
 
                 // Bouton de contrôle
                 Container(
@@ -2025,7 +2364,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                       BoxShadow(
                         color: AppColors.primary.withOpacity(0.4),
                         blurRadius: 15,
-                        offset: Offset(0, 5),
+                        offset: const Offset(0, 5),
                       ),
                     ],
                   ),
@@ -2038,7 +2377,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                     ),
                     label: Text(
                       _isRunning ? 'Pause' : 'Commencer',
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w600,
                         color: Colors.white,
@@ -2055,7 +2394,7 @@ class _BreathingScreenState extends State<BreathingScreen>
                   ),
                 ),
 
-                SizedBox(height: 40),
+                const SizedBox(height: 40),
 
                 // Conseils
                 Container(
@@ -2082,17 +2421,16 @@ class _BreathingScreenState extends State<BreathingScreen>
                         color: AppColors.accent,
                         size: 32,
                       ),
-                      SizedBox(height: 12),
-                      Text(
+                      const SizedBox(height: 12),
+                      const Text(
                         'Conseils',
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
-                          color: colors.onBackground,
                           fontFamily: 'Inter',
                         ),
                       ),
-                      SizedBox(height: 12),
+                      const SizedBox(height: 12),
                       Text(
                         '• Trouvez un endroit calme\n'
                         '• Asseyez-vous confortablement\n'
@@ -2120,7 +2458,7 @@ class _BreathingScreenState extends State<BreathingScreen>
 }
 
 // ==============================================
-// 9. ÉCRAN DE STATISTIQUES (Simplifié)
+// 10. ÉCRAN DE STATISTIQUES
 // ==============================================
 
 class StatsScreen extends StatefulWidget {
@@ -2133,10 +2471,15 @@ class StatsScreen extends StatefulWidget {
 }
 
 class _StatsScreenState extends State<StatsScreen> {
+  Map<MoodType, int> _moodFrequency = {};
+  List<MoodEntry> _lastWeekEntries = [];
+  MoodType? _mostFrequentMood;
+
   @override
   void initState() {
     super.initState();
     widget.appState.addListener(_refresh);
+    _loadStatistics();
   }
 
   @override
@@ -2145,21 +2488,29 @@ class _StatsScreenState extends State<StatsScreen> {
     super.dispose();
   }
 
+  Future<void> _loadStatistics() async {
+    _moodFrequency = await widget.appState.getMoodFrequency();
+    _lastWeekEntries = await widget.appState.getLastWeekEntries();
+    _mostFrequentMood = await widget.appState.getMostFrequentMood();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   void _refresh() {
-    setState(() {});
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final checkInDays = widget.appState.checkInDays;
-    final mostFrequentMood = widget.appState.getMostFrequentMood();
-    final frequency = widget.appState.getMoodFrequency();
-    final lastWeekEntries = widget.appState.getLastWeekEntries();
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
+        title: const Text(
           'Statistiques',
           style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600),
         ),
@@ -2198,15 +2549,15 @@ class _StatsScreenState extends State<StatsScreen> {
                         ),
                         _buildStatItem(
                           'Humeur dominante',
-                          mostFrequentMood != null
-                              ? _getMoodLabel(mostFrequentMood!)
+                          _mostFrequentMood != null
+                              ? _getMoodLabel(_mostFrequentMood!)
                               : '-',
                           Icons.insights,
                           AppColors.success,
                         ),
                       ],
                     ),
-                    SizedBox(height: 20),
+                    const SizedBox(height: 20),
                     Text(
                       'Tu prends soin de toi depuis $checkInDays jours',
                       style: TextStyle(
@@ -2223,7 +2574,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
 
-            SizedBox(height: 32),
+            const SizedBox(height: 32),
 
             // Fréquence des humeurs
             Text(
@@ -2235,7 +2586,7 @@ class _StatsScreenState extends State<StatsScreen> {
                 fontFamily: 'Inter',
               ),
             ),
-            SizedBox(height: 16),
+            const SizedBox(height: 16),
             Container(
               decoration: BoxDecoration(
                 color: colors.surface,
@@ -2252,7 +2603,7 @@ class _StatsScreenState extends State<StatsScreen> {
                 padding: const EdgeInsets.all(20),
                 child: Column(
                   children: MoodType.values.map((mood) {
-                    final count = frequency[mood] ?? 0;
+                    final count = _moodFrequency[mood] ?? 0;
                     final total = checkInDays == 0 ? 1 : checkInDays;
                     final percentage = (count / total * 100).toInt();
 
@@ -2267,7 +2618,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
 
-            SizedBox(height: 32),
+            const SizedBox(height: 32),
 
             // Dernière semaine
             Text(
@@ -2279,10 +2630,10 @@ class _StatsScreenState extends State<StatsScreen> {
                 fontFamily: 'Inter',
               ),
             ),
-            SizedBox(height: 16),
-            lastWeekEntries.isEmpty
+            const SizedBox(height: 16),
+            _lastWeekEntries.isEmpty
                 ? Container(
-                    padding: EdgeInsets.all(40),
+                    padding: const EdgeInsets.all(40),
                     decoration: BoxDecoration(
                       color: colors.surface,
                       borderRadius: BorderRadius.circular(24),
@@ -2294,7 +2645,7 @@ class _StatsScreenState extends State<StatsScreen> {
                           size: 64,
                           color: colors.onBackground.withOpacity(0.3),
                         ),
-                        SizedBox(height: 20),
+                        const SizedBox(height: 20),
                         Text(
                           'Pas assez de données',
                           style: TextStyle(
@@ -2304,7 +2655,7 @@ class _StatsScreenState extends State<StatsScreen> {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        SizedBox(height: 8),
+                        const SizedBox(height: 8),
                         Text(
                           'Revenez après quelques check-in',
                           style: TextStyle(
@@ -2331,14 +2682,14 @@ class _StatsScreenState extends State<StatsScreen> {
                     child: Padding(
                       padding: const EdgeInsets.all(20),
                       child: Column(
-                        children: lastWeekEntries.reversed.map((entry) {
+                        children: _lastWeekEntries.reversed.map((entry) {
                           return _buildWeekEntry(entry, colors);
                         }).toList(),
                       ),
                     ),
                   ),
 
-            SizedBox(height: 40),
+            const SizedBox(height: 40),
           ],
         ),
       ),
@@ -2362,7 +2713,7 @@ class _StatsScreenState extends State<StatsScreen> {
           ),
           child: Center(child: Icon(icon, color: color, size: 30)),
         ),
-        SizedBox(height: 12),
+        const SizedBox(height: 12),
         Text(
           value,
           style: TextStyle(
@@ -2410,7 +2761,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
           ),
-          SizedBox(width: 16),
+          const SizedBox(width: 16),
           Expanded(
             child: Text(
               _getMoodLabel(mood),
@@ -2431,7 +2782,7 @@ class _StatsScreenState extends State<StatsScreen> {
               fontFamily: 'Inter',
             ),
           ),
-          SizedBox(width: 12),
+          const SizedBox(width: 12),
           Container(
             width: 120,
             height: 8,
@@ -2457,7 +2808,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
           ),
-          SizedBox(width: 12),
+          const SizedBox(width: 12),
           Text(
             '$percentage%',
             style: TextStyle(
@@ -2490,7 +2841,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
           ),
-          SizedBox(width: 12),
+          const SizedBox(width: 12),
           Container(
             width: 40,
             height: 40,
@@ -2506,7 +2857,7 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
             ),
           ),
-          SizedBox(width: 12),
+          const SizedBox(width: 12),
           Expanded(
             child: Text(
               _getMoodLabel(entry.mood),
@@ -2585,7 +2936,7 @@ class _StatsScreenState extends State<StatsScreen> {
 }
 
 // ==============================================
-// 10. ÉCRAN DE PARAMÈTRES (Simplifié)
+// 11. ÉCRAN DE PARAMÈTRES
 // ==============================================
 
 class SettingsScreen extends StatelessWidget {
@@ -2598,13 +2949,90 @@ class SettingsScreen extends StatelessWidget {
     required this.onThemeChanged,
   });
 
+  void _showEmergencyDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          'Numéros d\'urgence',
+          style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w700),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildEmergencyNumber(context, '3114', 'Prévention du suicide'),
+            const SizedBox(height: 16),
+            _buildEmergencyNumber(context, '15', 'SAMU'),
+            const SizedBox(height: 16),
+            _buildEmergencyNumber(context, '112', 'Urgences européennes'),
+            const SizedBox(height: 20),
+            Text(
+              'Ces services sont disponibles 24h/24 et 7j/7.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(
+                  context,
+                ).colorScheme.onBackground.withOpacity(0.6),
+                fontFamily: 'Inter',
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              'Fermer',
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmergencyNumber(
+    BuildContext context,
+    String number,
+    String description,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          number,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
+            color: Colors.red,
+            fontFamily: 'Inter',
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          description,
+          style: TextStyle(
+            fontSize: 14,
+            color: Theme.of(context).colorScheme.onBackground.withOpacity(0.8),
+            fontFamily: 'Inter',
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
+        title: const Text(
           'Paramètres',
           style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600),
         ),
@@ -2638,19 +3066,18 @@ class SettingsScreen extends StatelessWidget {
                         color: AppColors.primary,
                         size: 24,
                       ),
-                      SizedBox(width: 12),
-                      Text(
+                      const SizedBox(width: 12),
+                      const Text(
                         'Personnalisation',
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
-                          color: colors.onBackground,
                           fontFamily: 'Inter',
                         ),
                       ),
                     ],
                   ),
-                  SizedBox(height: 20),
+                  const SizedBox(height: 20),
                   SwitchListTile(
                     title: Text(
                       'Mode sombre',
@@ -2698,7 +3125,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          SizedBox(height: 20),
+          const SizedBox(height: 20),
 
           // Section À propos
           Container(
@@ -2721,19 +3148,18 @@ class SettingsScreen extends StatelessWidget {
                   Row(
                     children: [
                       Icon(Icons.info_outline, color: AppColors.info, size: 24),
-                      SizedBox(width: 12),
-                      Text(
+                      const SizedBox(width: 12),
+                      const Text(
                         'À propos',
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
-                          color: colors.onBackground,
                           fontFamily: 'Inter',
                         ),
                       ),
                     ],
                   ),
-                  SizedBox(height: 20),
+                  const SizedBox(height: 20),
                   ListTile(
                     leading: Container(
                       width: 40,
@@ -2754,12 +3180,9 @@ class SettingsScreen extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    subtitle: Text(
+                    subtitle: const Text(
                       '1.0.0',
-                      style: TextStyle(
-                        color: colors.onBackground.withOpacity(0.6),
-                        fontFamily: 'Inter',
-                      ),
+                      style: TextStyle(fontFamily: 'Inter'),
                     ),
                   ),
                   ListTile(
@@ -2785,12 +3208,9 @@ class SettingsScreen extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    subtitle: Text(
+                    subtitle: const Text(
                       'Toutes les données sont stockées localement',
-                      style: TextStyle(
-                        color: colors.onBackground.withOpacity(0.6),
-                        fontFamily: 'Inter',
-                      ),
+                      style: TextStyle(fontFamily: 'Inter'),
                     ),
                   ),
                 ],
@@ -2798,7 +3218,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          SizedBox(height: 20),
+          const SizedBox(height: 20),
 
           // Section Ressources
           Container(
@@ -2825,19 +3245,18 @@ class SettingsScreen extends StatelessWidget {
                         color: AppColors.warning,
                         size: 24,
                       ),
-                      SizedBox(width: 12),
-                      Text(
+                      const SizedBox(width: 12),
+                      const Text(
                         'Ressources',
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
-                          color: colors.onBackground,
                           fontFamily: 'Inter',
                         ),
                       ),
                     ],
                   ),
-                  SizedBox(height: 20),
+                  const SizedBox(height: 20),
                   ListTile(
                     leading: Container(
                       width: 40,
@@ -2861,12 +3280,9 @@ class SettingsScreen extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    subtitle: Text(
+                    subtitle: const Text(
                       '3114 - Numéro national de prévention du suicide',
-                      style: TextStyle(
-                        color: colors.onBackground.withOpacity(0.6),
-                        fontFamily: 'Inter',
-                      ),
+                      style: TextStyle(fontFamily: 'Inter'),
                     ),
                     onTap: () => _showEmergencyDialog(context),
                   ),
@@ -2875,7 +3291,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          SizedBox(height: 20),
+          const SizedBox(height: 20),
 
           // Avertissement éthique
           Container(
@@ -2909,7 +3325,7 @@ class SettingsScreen extends StatelessWidget {
                     ),
                   ),
                 ),
-                SizedBox(height: 16),
+                const SizedBox(height: 16),
                 Text(
                   'Avertissement important',
                   style: TextStyle(
@@ -2919,7 +3335,7 @@ class SettingsScreen extends StatelessWidget {
                     fontFamily: 'Inter',
                   ),
                 ),
-                SizedBox(height: 12),
+                const SizedBox(height: 12),
                 Text(
                   'Cette application ne remplace pas un professionnel de santé. '
                   'En cas de détresse psychologique, consultez immédiatement un médecin ou un psychologue.',
@@ -2935,92 +3351,15 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          SizedBox(height: 40),
+          const SizedBox(height: 40),
         ],
       ),
-    );
-  }
-
-  void _showEmergencyDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          'Numéros d\'urgence',
-          style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w700),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildEmergencyNumber(context, '3114', 'Prévention du suicide'),
-            SizedBox(height: 16),
-            _buildEmergencyNumber(context, '15', 'SAMU'),
-            SizedBox(height: 16),
-            _buildEmergencyNumber(context, '112', 'Urgences européennes'),
-            SizedBox(height: 20),
-            Text(
-              'Ces services sont disponibles 24h/24 et 7j/7.',
-              style: TextStyle(
-                fontSize: 12,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onBackground.withOpacity(0.6),
-                fontFamily: 'Inter',
-                fontStyle: FontStyle.italic,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(
-              'Fermer',
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEmergencyNumber(
-    BuildContext context,
-    String number,
-    String description,
-  ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          number,
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w800,
-            color: Colors.red,
-            fontFamily: 'Inter',
-          ),
-        ),
-        SizedBox(height: 4),
-        Text(
-          description,
-          style: TextStyle(
-            fontSize: 14,
-            color: Theme.of(context).colorScheme.onBackground.withOpacity(0.8),
-            fontFamily: 'Inter',
-          ),
-        ),
-      ],
     );
   }
 }
 
 // ==============================================
-// 11. NAVIGATION PRINCIPALE
+// 12. NAVIGATION PRINCIPALE
 // ==============================================
 
 class MainNavigation extends StatefulWidget {
@@ -3038,176 +3377,40 @@ class _MainNavigationState extends State<MainNavigation> {
   @override
   void initState() {
     super.initState();
-    widget.appState.loadData();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    await widget.appState.loadData();
+  }
+
+  void _onItemTapped(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
+  }
+
+  void _onNavigateFromHome(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-
     return Scaffold(
       body: _getScreen(_selectedIndex),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: colors.surface,
-          boxShadow: [
-            BoxShadow(
-              color: colors.primary.withOpacity(0.1),
-              blurRadius: 20,
-              spreadRadius: 1,
-            ),
-          ],
-          borderRadius: BorderRadius.only(
-            topLeft: Radius.circular(24),
-            topRight: Radius.circular(24),
-          ),
-        ),
-        child: BottomNavigationBar(
-          currentIndex: _selectedIndex,
-          onTap: (index) => setState(() => _selectedIndex = index),
-          type: BottomNavigationBarType.fixed,
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          selectedItemColor: AppColors.primary,
-          unselectedItemColor: colors.onBackground.withOpacity(0.6),
-          selectedLabelStyle: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            fontFamily: 'Inter',
-          ),
-          unselectedLabelStyle: TextStyle(fontSize: 11, fontFamily: 'Inter'),
-          showUnselectedLabels: true,
-          items: [
-            BottomNavigationBarItem(
-              icon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _selectedIndex == 0
-                      ? AppColors.primary.withOpacity(0.1)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.home_outlined,
-                  size: _selectedIndex == 0 ? 26 : 24,
-                ),
-              ),
-              activeIcon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.home, size: 26),
-              ),
-              label: 'Accueil',
-            ),
-            BottomNavigationBarItem(
-              icon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _selectedIndex == 1
-                      ? AppColors.info.withOpacity(0.1)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.book_outlined,
-                  size: _selectedIndex == 1 ? 26 : 24,
-                ),
-              ),
-              activeIcon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.info.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.book, size: 26),
-              ),
-              label: 'Journal',
-            ),
-            BottomNavigationBarItem(
-              icon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _selectedIndex == 2
-                      ? AppColors.secondary.withOpacity(0.1)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.self_improvement_outlined,
-                  size: _selectedIndex == 2 ? 26 : 24,
-                ),
-              ),
-              activeIcon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.secondary.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.self_improvement, size: 26),
-              ),
-              label: 'Respiration',
-            ),
-            BottomNavigationBarItem(
-              icon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _selectedIndex == 3
-                      ? AppColors.success.withOpacity(0.1)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.insights_outlined,
-                  size: _selectedIndex == 3 ? 26 : 24,
-                ),
-              ),
-              activeIcon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.success.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.insights, size: 26),
-              ),
-              label: 'Statistiques',
-            ),
-            BottomNavigationBarItem(
-              icon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _selectedIndex == 4
-                      ? AppColors.accent.withOpacity(0.1)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.settings_outlined,
-                  size: _selectedIndex == 4 ? 26 : 24,
-                ),
-              ),
-              activeIcon: Container(
-                padding: EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.accent.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.settings, size: 26),
-              ),
-              label: 'Paramètres',
-            ),
-          ],
-        ),
-      ),
+      bottomNavigationBar: _buildBottomNavigationBar(),
     );
   }
 
   Widget _getScreen(int index) {
     switch (index) {
       case 0:
-        return HomeScreen(appState: widget.appState);
+        return HomeScreen(
+          appState: widget.appState,
+          onNavigate: _onNavigateFromHome,
+        );
       case 1:
         return JournalScreen(appState: widget.appState);
       case 2:
@@ -3220,13 +3423,178 @@ class _MainNavigationState extends State<MainNavigation> {
           onThemeChanged: () => setState(() {}),
         );
       default:
-        return HomeScreen(appState: widget.appState);
+        return HomeScreen(
+          appState: widget.appState,
+          onNavigate: _onNavigateFromHome,
+        );
     }
+  }
+
+  Widget _buildBottomNavigationBar() {
+    final colors = Theme.of(context).colorScheme;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surface,
+        boxShadow: [
+          BoxShadow(
+            color: colors.primary.withOpacity(0.1),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(24),
+          topRight: Radius.circular(24),
+        ),
+      ),
+      child: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        onTap: _onItemTapped,
+        type: BottomNavigationBarType.fixed,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        selectedItemColor: AppColors.primary,
+        unselectedItemColor: colors.onBackground.withOpacity(0.6),
+        selectedLabelStyle: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          fontFamily: 'Inter',
+        ),
+        unselectedLabelStyle: const TextStyle(
+          fontSize: 11,
+          fontFamily: 'Inter',
+        ),
+        showUnselectedLabels: true,
+        items: [
+          BottomNavigationBarItem(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _selectedIndex == 0
+                    ? AppColors.primary.withOpacity(0.1)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.home_outlined,
+                size: _selectedIndex == 0 ? 26 : 24,
+              ),
+            ),
+            activeIcon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.home, size: 26),
+            ),
+            label: 'Accueil',
+          ),
+          BottomNavigationBarItem(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _selectedIndex == 1
+                    ? AppColors.info.withOpacity(0.1)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.book_outlined,
+                size: _selectedIndex == 1 ? 26 : 24,
+              ),
+            ),
+            activeIcon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.info.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.book, size: 26),
+            ),
+            label: 'Journal',
+          ),
+          BottomNavigationBarItem(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _selectedIndex == 2
+                    ? AppColors.secondary.withOpacity(0.1)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.self_improvement_outlined,
+                size: _selectedIndex == 2 ? 26 : 24,
+              ),
+            ),
+            activeIcon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.secondary.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.self_improvement, size: 26),
+            ),
+            label: 'Respiration',
+          ),
+          BottomNavigationBarItem(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _selectedIndex == 3
+                    ? AppColors.success.withOpacity(0.1)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.insights_outlined,
+                size: _selectedIndex == 3 ? 26 : 24,
+              ),
+            ),
+            activeIcon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.success.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.insights, size: 26),
+            ),
+            label: 'Statistiques',
+          ),
+          BottomNavigationBarItem(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _selectedIndex == 4
+                    ? AppColors.accent.withOpacity(0.1)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.settings_outlined,
+                size: _selectedIndex == 4 ? 26 : 24,
+              ),
+            ),
+            activeIcon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.accent.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.settings, size: 26),
+            ),
+            label: 'Paramètres',
+          ),
+        ],
+      ),
+    );
   }
 }
 
 // ==============================================
-// 12. APPLICATION PRINCIPALE
+// 13. APPLICATION PRINCIPALE
 // ==============================================
 
 class SafeSpaceApp extends StatefulWidget {
@@ -3248,11 +3616,22 @@ class _SafeSpaceAppState extends State<SafeSpaceApp> {
   }
 
   Future<void> _initializeApp() async {
-    await Future.delayed(Duration(seconds: 2));
-    await _appState.loadData();
-    setState(() {
-      _isLoading = false;
-    });
+    try {
+      // Initialisation de la base de données
+      final dbHelper = DatabaseHelper();
+      await dbHelper.database; // Force l'initialisation
+
+      await Future.delayed(const Duration(seconds: 2));
+      await _appState.loadData();
+    } catch (e) {
+      print('Error initializing app: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   @override
@@ -3264,9 +3643,9 @@ class _SafeSpaceAppState extends State<SafeSpaceApp> {
       themeMode: _appState.darkMode ? ThemeMode.dark : ThemeMode.light,
       debugShowCheckedModeBanner: false,
       home: _isLoading
-          ? SplashScreen()
+          ? const SplashScreen()
           : AnimatedSplashScreen(
-              splash: SplashScreen(),
+              splash: const SplashScreen(),
               nextScreen: MainNavigation(appState: _appState),
               splashIconSize: 250,
               duration: 3000,

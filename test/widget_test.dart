@@ -13,7 +13,6 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:animated_splash_screen/animated_splash_screen.dart';
 import 'package:page_transition/page_transition.dart';
-import 'package:path/path.dart' as path hide Context;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -120,12 +119,12 @@ class DatabaseHelper {
 
   Future<Database> _initDatabase() async {
     final databasesPath = await getDatabasesPath();
-    final path = p.join(databasesPath, 'safespace.db');
+    final dbPath = p.join(
+      databasesPath,
+      'safespace.db',
+    ); // Changed variable name to avoid conflict
 
-    // Supprimer la base existante pour les tests (optionnel)
-    // await deleteDatabase(path);
-
-    return await openDatabase(path, version: 1, onCreate: _onCreate);
+    return await openDatabase(dbPath, version: 1, onCreate: _onCreate);
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -1820,8 +1819,8 @@ class _JournalScreenState extends State<JournalScreen> {
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Row(
-            children: const [
+          content: const Row(
+            children: [
               Icon(Icons.check_circle, color: Colors.white),
               SizedBox(width: 10),
               Text(
@@ -1838,7 +1837,7 @@ class _JournalScreenState extends State<JournalScreen> {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
-          duration: Duration(seconds: 2),
+          duration: const Duration(seconds: 2),
         ),
       );
     }

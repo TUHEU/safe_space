@@ -1,12 +1,17 @@
 // ==============================================
 // SAFESPACE - Flutter Mental Wellness App
+// MAIN FILE - Application entry point
 // ==============================================
 
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart' as p;
+import 'package:provider/provider.dart';
+import 'models.dart';
+import 'database.dart';
+import 'state.dart';
+import 'theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,438 +26,132 @@ void main() async {
 }
 
 // ==============================================
-// 1. DATA MODELS
+// APP STRUCTURE
 // ==============================================
 
-enum MoodType { happy, calm, neutral, sad, stressed }
+class SafeSpaceApp extends StatefulWidget {
+  const SafeSpaceApp({super.key});
 
-class MoodEntry {
-  int? id;
-  final MoodType mood;
-  final DateTime date;
-  final String? note;
-  final double? intensity;
-
-  MoodEntry({
-    this.id,
-    required this.mood,
-    required this.date,
-    this.note,
-    this.intensity,
-  });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'mood': mood.index,
-      'date': date.toIso8601String(),
-      'note': note,
-      'intensity': intensity ?? 0.5,
-    };
-  }
-
-  factory MoodEntry.fromMap(Map<String, dynamic> map) {
-    return MoodEntry(
-      id: map['id'],
-      mood: MoodType.values[map['mood']],
-      date: DateTime.parse(map['date']),
-      note: map['note'],
-      intensity: map['intensity'],
-    );
-  }
+  @override
+  State<SafeSpaceApp> createState() => _SafeSpaceAppState();
 }
 
-class JournalEntry {
-  final String id;
-  final DateTime date;
-  final String content;
-  final MoodType? mood;
+class _SafeSpaceAppState extends State<SafeSpaceApp> {
+  bool _isLoading = true;
 
-  JournalEntry({
-    required this.id,
-    required this.date,
-    required this.content,
-    this.mood,
-  });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'date': date.toIso8601String(),
-      'content': content,
-      'mood': mood?.index,
-    };
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
   }
 
-  factory JournalEntry.fromMap(Map<String, dynamic> map) {
-    return JournalEntry(
-      id: map['id'],
-      date: DateTime.parse(map['date']),
-      content: map['content'],
-      mood: map['mood'] != null ? MoodType.values[map['mood']] : null,
-    );
-  }
-}
-
-// ==============================================
-// 2. DATABASE HELPER
-// ==============================================
-
-class DatabaseHelper {
-  static final DatabaseHelper _instance = DatabaseHelper._internal();
-  factory DatabaseHelper() => _instance;
-  DatabaseHelper._internal();
-
-  static Database? _database;
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
-  }
-
-  Future<Database> _initDatabase() async {
-    final databasesPath = await getDatabasesPath();
-    final dbPath = p.join(databasesPath, 'safespace.db');
-
-    return await openDatabase(dbPath, version: 1, onCreate: _onCreate);
-  }
-
-  Future<void> _onCreate(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE moods (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        mood INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        note TEXT,
-        intensity REAL DEFAULT 0.5
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE journal (
-        id TEXT PRIMARY KEY,
-        date TEXT NOT NULL,
-        content TEXT NOT NULL,
-        mood INTEGER
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE preferences (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      )
-    ''');
-
-    await db.insert('preferences', {'key': 'darkMode', 'value': 'false'});
-  }
-
-  // Mood methods
-  Future<int> insertMood(MoodEntry mood) async {
-    final db = await database;
-    return await db.insert('moods', mood.toMap());
-  }
-
-  Future<List<MoodEntry>> getAllMoods() async {
-    final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query('moods');
-    return List.generate(maps.length, (i) => MoodEntry.fromMap(maps[i]));
-  }
-
-  Future<List<MoodEntry>> getMoodsLast7Days() async {
-    final db = await database;
-    final weekAgo = DateTime.now().subtract(const Duration(days: 7));
-    final List<Map<String, dynamic>> maps = await db.query(
-      'moods',
-      where: 'date >= ?',
-      whereArgs: [weekAgo.toIso8601String()],
-    );
-    return List.generate(maps.length, (i) => MoodEntry.fromMap(maps[i]));
-  }
-
-  Future<int> deleteMoodsByDate(DateTime date) async {
-    final db = await database;
-    final dateStr = DateTime(date.year, date.month, date.day).toIso8601String();
-    return await db.delete(
-      'moods',
-      where: 'date LIKE ?',
-      whereArgs: ['$dateStr%'],
-    );
-  }
-
-  // Journal methods
-  Future<int> insertJournal(JournalEntry entry) async {
-    final db = await database;
-    return await db.insert('journal', entry.toMap());
-  }
-
-  Future<List<JournalEntry>> getAllJournals() async {
-    final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query('journal');
-    return List.generate(maps.length, (i) => JournalEntry.fromMap(maps[i]));
-  }
-
-  Future<int> deleteJournal(String id) async {
-    final db = await database;
-    return await db.delete('journal', where: 'id = ?', whereArgs: [id]);
-  }
-
-  // Preferences methods
-  Future<void> setPreference(String key, String value) async {
-    final db = await database;
-    await db.insert('preferences', {
-      'key': key,
-      'value': value,
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<String?> getPreference(String key) async {
-    final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query(
-      'preferences',
-      where: 'key = ?',
-      whereArgs: [key],
-    );
-    if (maps.isNotEmpty) {
-      return maps.first['value'] as String?;
-    }
-    return null;
-  }
-
-  // Statistics methods
-  Future<Map<MoodType, int>> getMoodFrequency() async {
-    final db = await database;
-    final List<Map<String, dynamic>> result = await db.rawQuery('''
-      SELECT mood, COUNT(*) as count 
-      FROM moods 
-      GROUP BY mood
-    ''');
-
-    final frequency = <MoodType, int>{};
-    for (var mood in MoodType.values) {
-      frequency[mood] = 0;
-    }
-
-    for (var row in result) {
-      final mood = MoodType.values[row['mood'] as int];
-      frequency[mood] = row['count'] as int;
-    }
-
-    return frequency;
-  }
-}
-
-// ==============================================
-// 3. APP STATE MANAGEMENT
-// ==============================================
-
-class AppState extends ChangeNotifier {
-  List<MoodEntry> _moodEntries = [];
-  List<JournalEntry> _journalEntries = [];
-  bool _darkMode = false;
-  final DatabaseHelper _dbHelper = DatabaseHelper();
-
-  List<MoodEntry> get moodEntries => _moodEntries;
-  List<JournalEntry> get journalEntries => _journalEntries;
-  bool get darkMode => _darkMode;
-
-  // Positive affirmations
-  static final List<String> _affirmations = [
-    'Tu fais de ton mieux, et c\'est suffisant.',
-    'Ce que tu ressens est valide.',
-    'Prendre soin de soi n\'est pas un luxe, c\'est une nécessité.',
-    'Chaque petit pas compte.',
-    'Tu n\'es pas seul(e) dans ce que tu traverses.',
-    'La paix commence par une seule respiration.',
-    'Tu as le droit de prendre du temps pour toi.',
-    'Les émotions sont comme les nuages : elles passent.',
-    'Aujourd\'hui est un nouveau départ.',
-    'Tu es plus fort(e) que tu ne le penses.',
-    'Respire. Tout va bien se passer.',
-    'Ton bien-être est important.',
-  ];
-
-  String getRandomAffirmation() {
-    final random = DateTime.now().millisecondsSinceEpoch % _affirmations.length;
-    return _affirmations[random];
-  }
-
-  MoodEntry? get todaysMood {
-    final today = DateTime.now();
-    for (var entry in _moodEntries) {
-      if (entry.date.year == today.year &&
-          entry.date.month == today.month &&
-          entry.date.day == today.day) {
-        return entry;
+  Future<void> _initializeApp() async {
+    try {
+      final dbHelper = DatabaseHelper();
+      await dbHelper.database;
+      await Future.delayed(const Duration(seconds: 2));
+    } catch (e) {
+      print('Error initializing app: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
       }
     }
-    return null;
   }
 
-  int get checkInDays => _moodEntries.length;
-
-  // Load data from database
-  Future<void> loadData() async {
-    try {
-      _moodEntries = await _dbHelper.getAllMoods();
-      _journalEntries = await _dbHelper.getAllJournals();
-
-      final darkModeStr = await _dbHelper.getPreference('darkMode');
-      _darkMode = darkModeStr == 'true';
-
-      notifyListeners();
-    } catch (e) {
-      print('Error loading data: $e');
-    }
-  }
-
-  // Add mood entry
-  Future<void> addMoodEntry(MoodEntry entry) async {
-    try {
-      await _dbHelper.insertMood(entry);
-      _moodEntries = await _dbHelper.getAllMoods();
-      notifyListeners();
-    } catch (e) {
-      print('Error adding mood entry: $e');
-    }
-  }
-
-  // Update today's mood
-  Future<void> updateTodaysMood(MoodEntry newEntry) async {
-    try {
-      final today = DateTime.now();
-      await _dbHelper.deleteMoodsByDate(today);
-      await _dbHelper.insertMood(newEntry);
-      _moodEntries = await _dbHelper.getAllMoods();
-      notifyListeners();
-    } catch (e) {
-      print('Error updating mood: $e');
-    }
-  }
-
-  // Journal operations
-  Future<void> addJournalEntry(JournalEntry entry) async {
-    try {
-      await _dbHelper.insertJournal(entry);
-      _journalEntries = await _dbHelper.getAllJournals();
-      notifyListeners();
-    } catch (e) {
-      print('Error adding journal entry: $e');
-    }
-  }
-
-  Future<void> deleteJournalEntry(String id) async {
-    try {
-      await _dbHelper.deleteJournal(id);
-      _journalEntries = await _dbHelper.getAllJournals();
-      notifyListeners();
-    } catch (e) {
-      print('Error deleting journal entry: $e');
-    }
-  }
-
-  // Theme toggle
-  Future<void> toggleDarkMode() async {
-    _darkMode = !_darkMode;
-    try {
-      await _dbHelper.setPreference('darkMode', _darkMode.toString());
-      notifyListeners();
-    } catch (e) {
-      print('Error toggling dark mode: $e');
-    }
-  }
-
-  // Statistics
-  Future<Map<MoodType, int>> getMoodFrequency() async {
-    return await _dbHelper.getMoodFrequency();
-  }
-
-  Future<MoodType?> getMostFrequentMood() async {
-    final frequency = await getMoodFrequency();
-    if (frequency.isEmpty) return null;
-
-    final entries = frequency.entries.toList();
-    MoodType? mostFrequent;
-    int maxCount = 0;
-
-    for (var entry in entries) {
-      if (entry.value > maxCount) {
-        maxCount = entry.value;
-        mostFrequent = entry.key;
-      }
-    }
-
-    return mostFrequent;
-  }
-
-  Future<List<MoodEntry>> getLastWeekEntries() async {
-    return await _dbHelper.getMoodsLast7Days();
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider(
+      create: (_) => AppState(),
+      child: Consumer<AppState>(
+        builder: (context, appState, _) {
+          return MaterialApp(
+            title: 'SafeSpace',
+            theme: AppTheme.lightTheme,
+            darkTheme: AppTheme.darkTheme,
+            themeMode: appState.darkMode ? ThemeMode.dark : ThemeMode.light,
+            debugShowCheckedModeBanner: false,
+            home: _isLoading ? const SplashScreen() : const MainNavigation(),
+          );
+        },
+      ),
+    );
   }
 }
 
 // ==============================================
-// 4. APP THEME & COLORS
+// SPLASH SCREEN
 // ==============================================
 
-class AppColors {
-  // Light theme
-  static const Color primary = Color(0xFF7B9DFF);
-  static const Color secondary = Color(0xFF9FD8FF);
-  static const Color accent = Color(0xFFFFE7A0);
-  static const Color background = Color(0xFFF0F7FF);
-  static const Color surface = Color(0xFFFFFFFF);
-  static const Color text = Color(0xFF2C3E50);
-  static const Color textLight = Color(0xFF7F8C8D);
+class SplashScreen extends StatelessWidget {
+  const SplashScreen({super.key});
 
-  // Special elements
-  static const Color gradientStart = Color(0xFFA8E6CF);
-  static const Color gradientEnd = Color(0xFFDCEDC1);
-  static const Color success = Color(0xFF4CD964);
-  static const Color warning = Color(0xFFFF9500);
-  static const Color info = Color(0xFF5AC8FA);
-  static const Color love = Color(0xFFFF6B8B);
-
-  // Dark theme
-  static const Color darkPrimary = Color(0xFF8A8AFF);
-  static const Color darkSecondary = Color(0xFFA6B5FF);
-  static const Color darkAccent = Color(0xFFFFD166);
-  static const Color darkBackground = Color(0xFF121826);
-  static const Color darkSurface = Color(0xFF1E2438);
-  static const Color darkText = Color(0xFFE8F4F8);
-  static const Color darkTextLight = Color(0xFFB0BEC5);
-
-  // Mood colors
-  static Map<MoodType, Color> get moodColors => {
-    MoodType.happy: const Color(0xFFFFD166),
-    MoodType.calm: const Color(0xFF7B9DFF),
-    MoodType.neutral: const Color(0xFF95A5A6),
-    MoodType.sad: const Color(0xFF3498DB),
-    MoodType.stressed: const Color(0xFFFF6B8B),
-  };
-
-  // Gradients
-  static LinearGradient get mainGradient => LinearGradient(
-    colors: [gradientStart, gradientEnd],
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-  );
-
-  static LinearGradient get cardGradient => LinearGradient(
-    colors: [surface.withOpacity(0.9), accent.withOpacity(0.1)],
-    begin: Alignment.topCenter,
-    end: Alignment.bottomCenter,
-  );
-
-  static LinearGradient get buttonGradient => LinearGradient(
-    colors: [primary, Color(0xFF5D7FFF)],
-    begin: Alignment.centerLeft,
-    end: Alignment.centerRight,
-  );
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(gradient: AppColors.mainGradient),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 120,
+                height: 120,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(30),
+                  color: Colors.white.withOpacity(0.9),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primary.withOpacity(0.3),
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(30),
+                  child: Icon(
+                    Icons.psychology_outlined,
+                    size: 60,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 30),
+              const Text(
+                'SafeSpace',
+                style: TextStyle(
+                  fontSize: 42,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.text,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Prenez soin de votre esprit',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: AppColors.text.withOpacity(0.8),
+                ),
+              ),
+              const SizedBox(height: 50),
+              CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                strokeWidth: 3,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ==============================================
-// 5. CUSTOM WIDGETS
+// MOOD SELECTOR WIDGET
 // ==============================================
 
 class MoodSelector extends StatefulWidget {
@@ -685,85 +384,11 @@ class _MoodSelectorState extends State<MoodSelector> {
 }
 
 // ==============================================
-// 6. SCREENS
+// HOME SCREEN
 // ==============================================
 
-// Splash Screen
-class SplashScreen extends StatelessWidget {
-  const SplashScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(gradient: AppColors.mainGradient),
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 120,
-                height: 120,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(30),
-                  color: Colors.white.withOpacity(0.9),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.primary.withOpacity(0.3),
-                      blurRadius: 20,
-                      spreadRadius: 5,
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(30),
-                  child: Icon(
-                    Icons.psychology_outlined,
-                    size: 60,
-                    color: AppColors.primary,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 30),
-              const Text(
-                'SafeSpace',
-                style: TextStyle(
-                  fontSize: 42,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.text,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Prenez soin de votre esprit',
-                style: TextStyle(
-                  fontSize: 16,
-                  color: AppColors.text.withOpacity(0.8),
-                ),
-              ),
-              const SizedBox(height: 50),
-              CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
-                strokeWidth: 3,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// Home Screen
 class HomeScreen extends StatefulWidget {
-  final AppState appState;
-  final Function(int) onNavigate;
-
-  const HomeScreen({
-    super.key,
-    required this.appState,
-    required this.onNavigate,
-  });
+  const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -775,19 +400,24 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _currentAffirmation = widget.appState.getRandomAffirmation();
-    widget.appState.addListener(_refresh);
+    final appState = Provider.of<AppState>(context, listen: false);
+    _currentAffirmation = appState.getRandomAffirmation();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appState.addListener(_refresh);
+    });
   }
 
   @override
   void dispose() {
-    widget.appState.removeListener(_refresh);
+    final appState = Provider.of<AppState>(context, listen: false);
+    appState.removeListener(_refresh);
     super.dispose();
   }
 
   void _refresh() => setState(() {});
 
   void _updateMood() {
+    final appState = Provider.of<AppState>(context, listen: false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -813,11 +443,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     note: note,
                     intensity: 0.5,
                   );
-                  widget.appState.updateTodaysMood(entry);
+                  appState.updateTodaysMood(entry);
                   Navigator.pop(context);
                 },
-                initialMood: widget.appState.todaysMood?.mood,
-                initialNote: widget.appState.todaysMood?.note,
+                initialMood: appState.todaysMood?.mood,
+                initialNote: appState.todaysMood?.note,
               ),
               SizedBox(height: MediaQuery.of(context).viewInsets.bottom),
             ],
@@ -829,8 +459,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final appState = Provider.of<AppState>(context);
     final colors = Theme.of(context).colorScheme;
-    final todaysMood = widget.appState.todaysMood;
+    final todaysMood = appState.todaysMood;
 
     return Scaffold(
       backgroundColor: colors.background,
@@ -924,6 +555,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildDailyCheckIn(ColorScheme colors) {
+    final appState = Provider.of<AppState>(context);
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -974,7 +606,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   note: note,
                   intensity: 0.5,
                 );
-                widget.appState.addMoodEntry(entry);
+                appState.addMoodEntry(entry);
               },
             ),
           ],
@@ -1177,8 +809,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 IconButton(
                   onPressed: () {
                     setState(() {
-                      _currentAffirmation = widget.appState
-                          .getRandomAffirmation();
+                      final appState = Provider.of<AppState>(
+                        context,
+                        listen: false,
+                      );
+                      _currentAffirmation = appState.getRandomAffirmation();
                     });
                   },
                   icon: Icon(Icons.refresh, color: AppColors.primary),
@@ -1219,19 +854,30 @@ class _HomeScreenState extends State<HomeScreen> {
               Icons.book_outlined,
               'Journal',
               AppColors.info,
-              () => widget.onNavigate(1),
+              () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const JournalScreen()),
+              ),
             ),
             _buildQuickAccessItem(
               Icons.self_improvement_outlined,
               'Respiration',
               AppColors.secondary,
-              () => widget.onNavigate(2),
+              () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const BreathingScreen(),
+                ),
+              ),
             ),
             _buildQuickAccessItem(
               Icons.insights_outlined,
               'Statistiques',
               AppColors.success,
-              () => widget.onNavigate(3),
+              () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const StatsScreen()),
+              ),
             ),
             _buildQuickAccessItem(
               Icons.help_outline,
@@ -1427,11 +1073,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// Journal Screen
-class JournalScreen extends StatefulWidget {
-  final AppState appState;
+// ==============================================
+// JOURNAL SCREEN
+// ==============================================
 
-  const JournalScreen({super.key, required this.appState});
+class JournalScreen extends StatefulWidget {
+  const JournalScreen({super.key});
 
   @override
   State<JournalScreen> createState() => _JournalScreenState();
@@ -1444,12 +1091,16 @@ class _JournalScreenState extends State<JournalScreen> {
   @override
   void initState() {
     super.initState();
-    widget.appState.addListener(_refresh);
+    final appState = Provider.of<AppState>(context, listen: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appState.addListener(_refresh);
+    });
   }
 
   @override
   void dispose() {
-    widget.appState.removeListener(_refresh);
+    final appState = Provider.of<AppState>(context, listen: false);
+    appState.removeListener(_refresh);
     _journalController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -1463,14 +1114,15 @@ class _JournalScreenState extends State<JournalScreen> {
 
   void _saveEntry() {
     if (_journalController.text.trim().isNotEmpty) {
+      final appState = Provider.of<AppState>(context, listen: false);
       final entry = JournalEntry(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         date: DateTime.now(),
         content: _journalController.text.trim(),
-        mood: widget.appState.todaysMood?.mood,
+        mood: appState.todaysMood?.mood,
       );
 
-      widget.appState.addJournalEntry(entry);
+      appState.addJournalEntry(entry);
       _journalController.clear();
       _focusNode.unfocus();
 
@@ -1507,7 +1159,8 @@ class _JournalScreenState extends State<JournalScreen> {
           ),
           TextButton(
             onPressed: () {
-              widget.appState.deleteJournalEntry(id);
+              final appState = Provider.of<AppState>(context, listen: false);
+              appState.deleteJournalEntry(id);
               Navigator.pop(context);
             },
             child: const Text('Supprimer', style: TextStyle(color: Colors.red)),
@@ -1519,8 +1172,9 @@ class _JournalScreenState extends State<JournalScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final appState = Provider.of<AppState>(context);
     final colors = Theme.of(context).colorScheme;
-    final entries = widget.appState.journalEntries;
+    final entries = appState.journalEntries;
 
     return Scaffold(
       appBar: AppBar(
@@ -1760,7 +1414,10 @@ class _JournalScreenState extends State<JournalScreen> {
   }
 }
 
-// Breathing Screen
+// ==============================================
+// BREATHING SCREEN
+// ==============================================
+
 class BreathingScreen extends StatefulWidget {
   const BreathingScreen({super.key});
 
@@ -2061,11 +1718,12 @@ class _BreathingScreenState extends State<BreathingScreen>
   }
 }
 
-// Stats Screen
-class StatsScreen extends StatefulWidget {
-  final AppState appState;
+// ==============================================
+// STATS SCREEN
+// ==============================================
 
-  const StatsScreen({super.key, required this.appState});
+class StatsScreen extends StatefulWidget {
+  const StatsScreen({super.key});
 
   @override
   State<StatsScreen> createState() => _StatsScreenState();
@@ -2079,20 +1737,25 @@ class _StatsScreenState extends State<StatsScreen> {
   @override
   void initState() {
     super.initState();
-    widget.appState.addListener(_refresh);
-    _loadStatistics();
+    final appState = Provider.of<AppState>(context, listen: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appState.addListener(_refresh);
+      _loadStatistics();
+    });
   }
 
   @override
   void dispose() {
-    widget.appState.removeListener(_refresh);
+    final appState = Provider.of<AppState>(context, listen: false);
+    appState.removeListener(_refresh);
     super.dispose();
   }
 
   Future<void> _loadStatistics() async {
-    _moodFrequency = await widget.appState.getMoodFrequency();
-    _lastWeekEntries = await widget.appState.getLastWeekEntries();
-    _mostFrequentMood = await widget.appState.getMostFrequentMood();
+    final appState = Provider.of<AppState>(context, listen: false);
+    _moodFrequency = await appState.getMoodFrequency();
+    _lastWeekEntries = await appState.getLastWeekEntries();
+    _mostFrequentMood = await appState.getMostFrequentMood();
     if (mounted) {
       setState(() {});
     }
@@ -2106,8 +1769,9 @@ class _StatsScreenState extends State<StatsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final appState = Provider.of<AppState>(context);
     final colors = Theme.of(context).colorScheme;
-    final checkInDays = widget.appState.checkInDays;
+    final checkInDays = appState.checkInDays;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Statistiques')),
@@ -2518,19 +2182,16 @@ class _StatsScreenState extends State<StatsScreen> {
   }
 }
 
-// Settings Screen
-class SettingsScreen extends StatelessWidget {
-  final AppState appState;
-  final VoidCallback onThemeChanged;
+// ==============================================
+// SETTINGS SCREEN
+// ==============================================
 
-  const SettingsScreen({
-    super.key,
-    required this.appState,
-    required this.onThemeChanged,
-  });
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final appState = Provider.of<AppState>(context);
     final colors = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -2592,7 +2253,6 @@ class SettingsScreen extends StatelessWidget {
                     value: appState.darkMode,
                     onChanged: (value) {
                       appState.toggleDarkMode();
-                      onThemeChanged();
                     },
                     secondary: Container(
                       width: 40,
@@ -2746,13 +2406,11 @@ class SettingsScreen extends StatelessWidget {
 }
 
 // ==============================================
-// 7. MAIN NAVIGATION
+// MAIN NAVIGATION
 // ==============================================
 
 class MainNavigation extends StatefulWidget {
-  final AppState appState;
-
-  const MainNavigation({super.key, required this.appState});
+  const MainNavigation({super.key});
 
   @override
   State<MainNavigation> createState() => _MainNavigationState();
@@ -2768,16 +2426,11 @@ class _MainNavigationState extends State<MainNavigation> {
   }
 
   Future<void> _loadData() async {
-    await widget.appState.loadData();
+    final appState = Provider.of<AppState>(context, listen: false);
+    await appState.loadData();
   }
 
   void _onItemTapped(int index) {
-    setState(() {
-      _selectedIndex = index;
-    });
-  }
-
-  void _onNavigateFromHome(int index) {
     setState(() {
       _selectedIndex = index;
     });
@@ -2794,30 +2447,22 @@ class _MainNavigationState extends State<MainNavigation> {
   Widget _getScreen(int index) {
     switch (index) {
       case 0:
-        return HomeScreen(
-          appState: widget.appState,
-          onNavigate: _onNavigateFromHome,
-        );
+        return const HomeScreen();
       case 1:
-        return JournalScreen(appState: widget.appState);
+        return const JournalScreen();
       case 2:
         return const BreathingScreen();
       case 3:
-        return StatsScreen(appState: widget.appState);
+        return const StatsScreen();
       case 4:
-        return SettingsScreen(
-          appState: widget.appState,
-          onThemeChanged: () => setState(() {}),
-        );
+        return const SettingsScreen();
       default:
-        return HomeScreen(
-          appState: widget.appState,
-          onNavigate: _onNavigateFromHome,
-        );
+        return const HomeScreen();
     }
   }
 
   Widget _buildBottomNavigationBar() {
+    final appState = Provider.of<AppState>(context);
     final colors = Theme.of(context).colorScheme;
 
     return Container(
@@ -2972,58 +2617,6 @@ class _MainNavigationState extends State<MainNavigation> {
           ),
         ],
       ),
-    );
-  }
-}
-
-// ==============================================
-// 8. MAIN APP
-// ==============================================
-
-class SafeSpaceApp extends StatefulWidget {
-  const SafeSpaceApp({super.key});
-
-  @override
-  State<SafeSpaceApp> createState() => _SafeSpaceAppState();
-}
-
-class _SafeSpaceAppState extends State<SafeSpaceApp> {
-  late AppState _appState;
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _appState = AppState();
-    _initializeApp();
-  }
-
-  Future<void> _initializeApp() async {
-    try {
-      final dbHelper = DatabaseHelper();
-      await dbHelper.database;
-      await Future.delayed(const Duration(seconds: 2));
-      await _appState.loadData();
-    } catch (e) {
-      print('Error initializing app: $e');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'SafeSpace',
-      themeMode: _appState.darkMode ? ThemeMode.dark : ThemeMode.light,
-      debugShowCheckedModeBanner: false,
-      home: _isLoading
-          ? const SplashScreen()
-          : MainNavigation(appState: _appState),
     );
   }
 }

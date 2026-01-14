@@ -3,9 +3,7 @@
 // ==============================================
 
 import 'package:flutter/material.dart';
-
-// Re-define MoodType for this file
-enum MoodType { happy, calm, neutral, sad, stressed }
+import 'models.dart';
 
 class AppColors {
   // Light theme
